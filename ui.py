@@ -703,9 +703,11 @@ def switch_to_payment_mode_with_data():
                 lines = f.readlines()
                 if len(lines) >= 1:
                     plate = lines[0].strip()
+                    
                 else:
                     print(
                         "File lpr.txt kosong, tidak ada data plat nomor")
+            os.remove("lpr.txt")
 
         payment_data = {
             "ticket_code": ticket_data.get("ticket_code", ""),
