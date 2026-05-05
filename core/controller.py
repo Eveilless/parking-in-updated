@@ -1,306 +1,207 @@
 import threading
 import time
 import os
-import json
-import logging
-from handlers import sound_handler, oled_handler, serial_handler
-from transaction import validate_ticket, validate_emoney, validate_rfid, update_translog, attempt_deduction
 
-class ParkingOutController:
-    def __init__(self, modbus, printer, emoney, rfid, qr, ui_manager):
+class ParkingController:
+    def __init__(self, modbus, printer, emoney, rfid, oled, api, offline, ui_manager):
         self.modbus = modbus
         self.printer = printer
         self.emoney = emoney
         self.rfid = rfid
-        self.qr = qr
+        self.oled = oled
+        self.api = api
+        self.offline = offline
         self.ui = ui_manager
         
         self.running = False
         self.vehicle_detected = False
+        self.type_vehicle = None
         self.is_busy = False
-        self.transaction_successful = False
-        self.state_lock = threading.Lock()
+        self.lock = threading.Lock()
         
-        self.welcome_text = os.getenv("WELCOME_TEXT", "SELAMAT DATANG BHC PARKING SYSTEM")
-        self.ip_address = "127.0.0.1"
-
-    def print_to_oled(self, row_one='', row_two='', row_three=''):
-        logging.info(row_one)
-        oled_handler.print_oled(self.ip_address, row_one, row_two, row_three)
-
     def start(self):
         self.running = True
         self.modbus.connect()
+        if self.oled:
+            self.oled.print_message("Sistem Siap!")
+            self.oled.print_message("Menunggu Mobil..")
         
-        # Connect serial devices
-        self.emoney.connect()
-        self.rfid.connect()
-        self.qr.connect()
-
-        # Start background threads
-        threading.Thread(target=self._modbus_loop, daemon=True).start()
-        threading.Thread(target=self._emoney_loop, daemon=True).start()
-        threading.Thread(target=self._rfid_loop, daemon=True).start()
-        threading.Thread(target=self._qr_loop, daemon=True).start()
+        threading.Thread(target=self.modbus_loop, daemon=True).start()
+        threading.Thread(target=self.emoney_loop, daemon=True).start()
+        threading.Thread(target=self.rfid_loop, daemon=True).start()
 
     def stop(self):
         self.running = False
         self.modbus.disconnect()
-        self.emoney.disconnect()
-        self.rfid.disconnect()
-        self.qr.disconnect()
+        self.emoney.close()
+        self.rfid.close()
 
-    def set_ui_text(self, text, mode="welcome"):
-        if self.ui and self.ui.main_widget:
-            self.ui.main_widget.mode = mode
-            if mode == "welcome":
-                self.ui.main_widget.set_welcome_text(text)
-            self.ui.main_widget.update()
-
-    def release_system(self, success=False):
-        """Melepaskan state lock dan me-reset sistem jika gagal, atau menahan lock jika sukses hingga kendaraan pergi"""
-        with self.state_lock:
-            self.transaction_successful = success
-            if not success:
-                self.is_busy = False
-                self.modbus.close_gate()
-                print("Sistem SIAP kembali (Transaksi Gagal/Dibatalkan).")
-            else:
-                print("Transaksi SUKSES. Sistem menahan state sibuk hingga kendaraan pergi.")
-
-    def _modbus_loop(self):
+    def modbus_loop(self):
         prev_button = None
         while self.running:
-            try:
-                inputs = self.modbus.read_inputs()
-                if inputs:
-                    loop_sensor = inputs[self.modbus.reg_loop_sensor]
-                    button = inputs[self.modbus.reg_button_ticket]
-                    
-                    # Logic: Loop Sensor
-                    if loop_sensor == 1:
-                        with self.state_lock:
-                            if not self.vehicle_detected:
-                                self.vehicle_detected = True
-                                sound_handler.play_vehicle_detected_sound("../assets/print_ticket.mp3")
-                                self.print_to_oled("Vehicle detected")
-                                self.set_ui_text("SILAHKAN TEMPELKAN KARTU ATAU SCAN TIKET")
-                                
-                                self.emoney.reset_buffer()
-                                self.rfid.reset_buffer()
-                                self.qr.reset_buffer()
-                    else:
-                        if self.vehicle_detected:
-                            print("Kendaraan meninggalkan loop sensor")
-                            self.set_ui_text(self.welcome_text.upper())
-                            with self.state_lock:
-                                self.is_busy = False
-                                self.transaction_successful = False
-                                self.vehicle_detected = False
-                                self.modbus.close_gate()
-
-                    # Logic: Reprint Button
-                    if prev_button == 0 and button == 1:
-                        with self.state_lock:
-                            if not self.vehicle_detected:
-                                print("Tombol ditekan tapi tidak ada mobil.")
-                            elif self.is_busy and self.transaction_successful:
-                                threading.Thread(target=self._handle_reprint, daemon=True).start()
-                            else:
-                                print("Scan tiket dahulu sebelum cetak.")
-                                
-                    prev_button = button
-
-            except Exception as e:
-                print(f"Modbus loop error: {e}")
+            registers = self.modbus.read_inputs()
+            if registers:
+                loop_one = registers[self.modbus.LOOP_ONE]
+                loop_two = registers[self.modbus.LOOP_TWO]
+                button_ticket = registers[self.modbus.BUTTON_TICKET]
+                
+                # Vehicle Detection
+                if loop_one == 1:
+                    local_type = os.getenv("IDLOOP1") if loop_two == 0 else os.getenv("IDLOOP2")
+                    with self.lock:
+                        if not self.vehicle_detected:
+                            self.vehicle_detected = True
+                            self.type_vehicle = local_type
+                            self.emoney.flush()
+                            self.rfid.flush()
+                            if self.oled:
+                                self.oled.print_message(f"Mobil Terdeteksi!")
+                                self.oled.print_message(f"Tipe: {self.type_vehicle}")
+                            if self.ui:
+                                if hasattr(self.ui, 'main_widget') and self.ui.main_widget:
+                                    self.ui.main_widget.mode = "welcome"
+                                    self.ui.main_widget.update()
+                                self.ui.set_welcome_text("SILAHKAN TEMPELKAN KARTU ATAU TEKAN TOMBOL TICKET")
+                else:
+                    if self.vehicle_detected:
+                        self.modbus.close_gate()
+                        if self.is_busy:
+                            if os.path.exists("ticket_data.json"): os.remove("ticket_data.json")
+                            self.is_busy = False
+                        self.vehicle_detected = False
+                        self.type_vehicle = None
+                        if self.oled:
+                            self.oled.print_message("Mobil Keluar")
+                            self.oled.print_message("Menunggu Mobil..")
+                        if self.ui:
+                            if hasattr(self.ui, 'main_widget') and self.ui.main_widget:
+                                self.ui.main_widget.mode = "welcome"
+                                self.ui.main_widget.update()
+                            self.ui.set_welcome_text(os.getenv("WELCOME_TEXT", "SELAMAT DATANG"))
+                            if hasattr(self.ui, 'cleanup_vehicle_images'):
+                                self.ui.cleanup_vehicle_images()
+                
+                # Button Detection
+                if prev_button == 0 and button_ticket == 1:
+                    with self.lock:
+                        if not self.is_busy and self.vehicle_detected:
+                            self.is_busy = True
+                            threading.Thread(target=self.handle_print_ticket, args=(self.type_vehicle,), daemon=True).start()
+                prev_button = button_ticket
             time.sleep(0.5)
 
-    def _handle_reprint(self):
-        active_file = os.getenv('ACTIVE_TRANSACTION_FILE')
-        if active_file and os.path.exists(active_file):
-            with open(active_file, "r") as f:
-                data = json.load(f)
-            self.printer.print_invoice(data)
+    def wait_and_show_payment_ui(self):
+        if not self.ui or not hasattr(self.ui, 'switch_to_payment_mode_with_data'):
+            return
+            
+        import glob
+        # Wait up to 5 seconds for at least one image to appear
+        for _ in range(50):
+            has_ipcam = len([f for f in glob.glob("ipcam/*") if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))]) > 0
+            has_lpr = len([f for f in glob.glob("lpr/*") if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))]) > 0
+            
+            if has_ipcam or has_lpr:
+                time.sleep(0.5)
+                break
+            time.sleep(0.1)
+            
+        self.ui.switch_to_payment_mode_with_data()
 
-    def _emoney_loop(self):
-        while self.running:
-            if not self.emoney.is_connected():
-                self.emoney.connect()
-                time.sleep(3)
-                continue
-                
-            if not self.vehicle_detected:
-                time.sleep(0.05)
-                continue
-                
-            with self.state_lock:
-                if self.is_busy:
-                    time.sleep(0.1)
-                    continue
-
-            # Check card via serial handler (blocking call)
-            success_read, card_data, conn = serial_handler.check_balance(self.emoney.serial_conn)
-            if not success_read:
-                time.sleep(0.1)
-                continue
-
-            with self.state_lock:
-                if self.is_busy:
-                    continue
-                self.is_busy = True
-                self.transaction_successful = False
-                
-            try:
-                card_number = card_data.get('card_number')
-                self.set_ui_text(f"VALIDATE: {card_number}")
-                
-                success_val, response = validate_emoney(card_number)
-                if not success_val:
-                    raise ValueError(response.get("message", "Validasi Gagal"))
-
-                with open(os.getenv('ACTIVE_TRANSACTION_FILE'), "w") as file:
-                    json.dump(response, file, indent=4)
-
-                status = response.get("status_gate")
-                if status == "payed" or (status == "generated" and int(response.get('total_price') or 0) == 0):
-                    self.modbus.open_gate()
-                    self.set_ui_text(f"LUNAS: {card_number}")
-                    update_translog(response, None, None, None)
-                    self.release_system(success=True)
-                elif status == "generated":
-                    # Menunggu pembayaran
-                    self.ui.main_widget.mode = "payment"
-                    self.ui.main_widget.set_payment_data({
-                        "Ticket Code": response.get('ticket_code'),
-                        "Total Harga": int(response.get('total_price') or 0)
-                    })
-                    self.ui.main_widget.update()
-                    time.sleep(2)
-                    success_payment = self._handle_payment_loop()
-                    self.release_system(success=success_payment)
-                else:
-                    raise ValueError("Status tidak dikenal")
-
-            except Exception as e:
-                self.set_ui_text(str(e).upper())
-                time.sleep(2)
-                self.release_system(success=False)
-            finally:
-                self.emoney.reset_buffer()
-
-    def _rfid_loop(self):
-        while self.running:
-            if not self.rfid.is_connected():
-                self.rfid.connect()
-                time.sleep(3)
-                continue
-                
-            data = self.rfid.read_data()
-            if not data or not self.vehicle_detected:
-                time.sleep(0.1)
-                continue
-                
-            with self.state_lock:
-                if self.is_busy:
-                    continue
-                self.is_busy = True
-                
-            try:
-                self.set_ui_text(f"VALIDATE RFID: {data}")
-                success_val, response = validate_rfid(data)
-                
-                if success_val:
-                    self.modbus.open_gate()
-                    self.set_ui_text(f"TERIMA KASIH: {data}")
-                    self.release_system(success=True)
-                else:
-                    raise ValueError(response.get("message", "Validasi RFID Gagal"))
-            except Exception as e:
-                self.set_ui_text(str(e).upper())
-                time.sleep(2)
-                self.release_system(success=False)
-
-    def _qr_loop(self):
-        while self.running:
-            if not self.qr.is_connected():
-                self.qr.connect()
-                time.sleep(3)
-                continue
-                
-            data = self.qr.read_data()
-            if not data or not self.vehicle_detected:
-                time.sleep(0.1)
-                continue
-                
-            with self.state_lock:
-                if self.is_busy:
-                    continue
-                self.is_busy = True
-                
-            try:
-                self.set_ui_text(f"VALIDATE: {data}")
-                success_val, response = validate_ticket(data)
-                
-                if not success_val:
-                    raise ValueError(response.get("message", "Validasi Tiket Gagal"))
-
-                with open(os.getenv('ACTIVE_TRANSACTION_FILE'), "w") as file:
-                    json.dump(response, file, indent=4)
-
-                status = response.get("status_gate")
-                if status == "payed" or (status == "generated" and int(response.get('total_price') or 0) == 0):
-                    self.modbus.open_gate()
-                    update_translog(response, None, None, None)
-                    self.set_ui_text("LUNAS")
-                    self.release_system(success=True)
-                elif status == "generated":
-                    virtualCode = response.get("virtual_code")
-                    if virtualCode:
-                        self.printer.print_qris(virtualCode)
-                        
-                    self.ui.main_widget.mode = "payment"
-                    self.ui.main_widget.set_payment_data({
-                        "Ticket Code": response.get('ticket_code'),
-                        "Total Harga": int(response.get('total_price') or 0)
-                    })
-                    self.ui.main_widget.update()
-                    time.sleep(2)
-                    success_payment = self._handle_payment_loop()
-                    self.release_system(success=success_payment)
-                    
-            except Exception as e:
-                self.set_ui_text(str(e).upper())
-                time.sleep(2)
-                self.release_system(success=False)
-
-    def _handle_payment_loop(self):
-        payment_attempts = 0
-        MAX_ATTEMPTS = 3
+    def handle_print_ticket(self, vehicle_type):
+        plate = self.offline.get_plate()
+        success, response = self.api.validate_ticket(vehicle_type, plate)
         
-        while payment_attempts < MAX_ATTEMPTS:
-            if not self.vehicle_detected:
-                serial_handler.send_cancel_command(self.emoney.serial_conn)
-                self.set_ui_text("TRANSAKSI DIBATALKAN")
-                sound_handler.play_vehicle_detected_sound("../assets/cancel.mp3")
-                time.sleep(2)
-                return False
-
-            response = attempt_deduction(self.emoney.serial_conn)
-            if response and response.get('success'):
+        if success:
+            self.offline.save_transaction(response)
+            self.printer.print_ticket(response)
+            self.modbus.open_gate()
+            if self.oled: self.oled.print_message("Gerbang Terbuka!")
+            self.wait_and_show_payment_ui()
+        else:
+            ticket_data = self.offline.generate_offline_ticket(vehicle_type, plate)
+            if self.offline.save_transaction(ticket_data):
+                self.printer.print_ticket(ticket_data)
                 self.modbus.open_gate()
-                self.set_ui_text("PEMBAYARAN BERHASIL")
-                return True
-            elif response and response.get("message") != "No card detected":
-                payment_attempts += 1
-                remaining = MAX_ATTEMPTS - payment_attempts
-                if remaining > 0:
-                    self.set_ui_text(f"GAGAL. SISA {remaining} PERCOBAAN", mode="payment")
-                    time.sleep(1.5)
-                else:
-                    self.set_ui_text("TRANSAKSI DIBATALKAN\nBATAS PERCOBAAN HABIS", mode="welcome")
-                    time.sleep(2)
-            time.sleep(0.2)
+                if self.oled: self.oled.print_message("Gerbang Terbuka! (Offline)")
+                self.wait_and_show_payment_ui()
+        
+        with self.lock:
+            self.is_busy = False
 
-        serial_handler.send_cancel_command(self.emoney.serial_conn)
-        sound_handler.play_vehicle_detected_sound("../assets/cancel.mp3")
-        return False
+    def emoney_loop(self):
+        ALLOWED_CARDS = ["02", "03", "04", "05"]
+        while self.running:
+            if not self.emoney.connect():
+                time.sleep(1)
+                continue
+            if not self.vehicle_detected:
+                time.sleep(0.1)
+                continue
+                
+            in_waiting = self.emoney.serial_conn.in_waiting if self.emoney.serial_conn else 0
+            if in_waiting > 0:
+                raw = self.emoney.read_bytes(in_waiting)
+                if raw:
+                    print(f"[Emoney Debug] Menerima data: {raw.hex().upper()}")
+                    card_info = self.emoney.process_stream(raw)
+                    if card_info:
+                        print(f"[Emoney Debug] Kartu Valid: {card_info}")
+                        with self.lock:
+                            print(f"[Emoney Debug] Lock acquired. is_busy={self.is_busy}, vehicle_detected={self.vehicle_detected}")
+                            if not self.is_busy and self.vehicle_detected:
+                                self.is_busy = True
+                                vehicle_type = self.type_vehicle
+                                
+                                try:
+                                    print(f"[Emoney Debug] Memeriksa tipe kartu: {card_info['cardType']} in {ALLOWED_CARDS}")
+                                    if card_info["cardType"] in ALLOWED_CARDS:
+                                        print(f"[Emoney Debug] Memvalidasi ke API Server...")
+                                        success, msg, tx = self.api.validate_emoney(
+                                            card_info["cardNo"], card_info["cardType"], 
+                                            self.offline.get_plate(), vehicle_type
+                                        )
+                                        print(f"[Emoney Debug] Hasil API: success={success}, msg={msg}")
+                                        if success:
+                                            print("[Emoney Debug] Transaksi Sukses! Buka gerbang.")
+                                            self.modbus.open_gate()
+                                            if self.oled: self.oled.print_message("Gerbang Terbuka! (Emoney)")
+                                            self.offline.save_transaction(tx)
+                                            self.wait_and_show_payment_ui()
+                                        else:
+                                            print(f"[Emoney Debug] Transaksi Gagal! Pesan: {msg}")
+                                            if self.ui:
+                                                self.ui.set_welcome_text(msg)
+                                    else:
+                                        print("[Emoney Debug] Tipe kartu tidak diizinkan.")
+                                    self.emoney.flush()
+                                finally:
+                                    self.is_busy = False
+                            else:
+                                print("[Emoney Debug] Diabaikan karena sedang sibuk atau mobil belum terdeteksi penuh.")
+            time.sleep(0.05)
+
+    def rfid_loop(self):
+        while self.running:
+            if not self.rfid.connect(): continue
+            if not self.vehicle_detected:
+                time.sleep(0.1)
+                continue
+                
+            raw = self.rfid.read_line()
+            if raw and len(raw) >= 3:
+                with self.lock:
+                    if not self.is_busy and self.vehicle_detected:
+                        self.is_busy = True
+                        vehicle_type = self.type_vehicle
+                        
+                        try:
+                            data_rfid, valid = self.rfid.parse_data(raw)
+                            if valid:
+                                success, tx = self.api.validate_rfid(data_rfid, vehicle_type)
+                                if success:
+                                    self.modbus.open_gate()
+                                    if self.oled: self.oled.print_message("Gerbang Terbuka! (RFID)")
+                            self.rfid.flush()
+                        finally:
+                            self.is_busy = False
+            time.sleep(0.05)

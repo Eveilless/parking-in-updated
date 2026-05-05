@@ -1,13 +1,11 @@
+import re
 import serial  # type: ignore
 import time
+from datetime import datetime
 import logging
-import config
-import os
-import json
-# from utils import calculate_lrc
-# from handlers import oled_handler
-
-config.load_config()
+from config import SERIAL_PORT, BAUDRATE, SERIAL_PORT_QR, SERIAL_PORT_RFID
+from utils import calculate_lrc
+# from oled_handler import print_oled
 
 
 def init_serial(port, baudrate=9600, timeout=0.1, name=""):
@@ -24,33 +22,18 @@ def init_serial(port, baudrate=9600, timeout=0.1, name=""):
         return serial_port, False
     except Exception as e:
         print(f"Error opening serial port {port}: {e}")
-        # oled_handler.print_oled(f"Error serial {name}", "Not connected")
+        # print_oled(f"Error serial {name}", "Not connected")
         return None, True
 
 
 def initialize_device():
     """Menginisialisasi perangkat e-money reader."""
     try:
-        with serial.Serial(os.getenv("SERIAL_PORT"), 38400, timeout=2) as ser:
+        with serial.Serial(SERIAL_PORT, BAUDRATE, timeout=2) as ser:
             logging.info("Initializing device...")
-            init_key = bytes.fromhex("FDD10CC9F79C4CC78CA15CDD4CDEBF91")
-            command_prefix = b'\xEF\x01\x01'
-            command_body = command_prefix + init_key
-            data_length = len(command_body)
-            length_bytes = data_length.to_bytes(2, 'big')
-
-            lrc_payload = length_bytes + command_body
-            lrc_value = calculate_lrc(lrc_payload)
-
-            full_command = b'\x02' + lrc_payload + lrc_value
-            logging.info(
-                f"Constructed Init Command: {full_command.hex().upper()}")
-
-            # init_command = bytes.fromhex(
-            #     "020013EF0101758F40D46D95D1641448AA19B9282C0588")
-            # init_command = bytes.fromhex(
-            #     "020013EF0101")
-            ser.write(full_command)
+            init_command = bytes.fromhex(
+                "020013EF0101758F40D46D95D1641448AA19B9282C0588")
+            ser.write(init_command)
             ser.flush()
             time.sleep(1)
             response = ser.read_all()
@@ -62,36 +45,13 @@ def initialize_device():
         logging.error(f"Error opening serial port: {e}")
 
 
-def read_qr_code(serial_qr):
-    """Membaca data dari scanner QR Code."""
-    try:
-        if serial_qr.in_waiting:
-            data = serial_qr.readline().decode('utf-8').strip()
-            return data, True, serial_qr
-    except (serial.SerialException, OSError):
-        logging.error(f"QR Code disconnected, try to reconnect")
-        print("QR Code disconnected, try to reconnect")
-        try:
-            serial_qr.close()
-        except:
-            pass
-
-        try:
-            ser = serial.Serial(config.SERIAL_PORT_QR, 9600, timeout=0.1)
-            print("QR Serial reconnected.")
-        except Exception as e:
-            print(f"Reconnect QR failed: {e}")
-            ser = None
-        return None, False, ser
-    return None, False, serial_qr
-
-
 def read_rfid(serial_rfid):
     try:
         if serial_rfid is None or not serial_rfid.is_open:
             raise serial.SerialException("RFID Serial not open")
 
         data = serial_rfid.readline()
+
         if len(data) < 3:
             serial_rfid.flushInput()
             serial_rfid.flushOutput()
@@ -125,12 +85,35 @@ def read_rfid(serial_rfid):
             pass
         try:
             serial_rfid = serial.Serial(
-                config.SERIAL_PORT_RFID, 9600, timeout=0.1)
+                SERIAL_PORT_RFID, 9600, timeout=0.1)
             print("RFID Serial reconnected.")
         except Exception as e:
             print(f"Reconnect RFID failed: {e}")
             serial_rfid = None
         return "", False, serial_rfid
+
+
+def parse_lpr_data(data: bytes):
+    try:
+        hex_string = data.hex().upper()
+        # print(hex_string)
+        # print(hex_string[0:10])
+        # BB88AA03FF42453236313644414B00000000000000000000000000006402001C
+        if hex_string[0:10] == "BB88AA02FF" or hex_string[0:10] == "BB88AA03FF":
+            raw_plate_data = hex_string[10:]
+            # print(raw_plate_data)
+            raw_plate_data = raw_plate_data[:-34]
+            # print(raw_plate_data)
+            plate_ascii_string = bytes.fromhex(raw_plate_data).decode('ascii')
+            # print(plate_ascii_string)
+            clean_plate = plate_ascii_string
+            return clean_plate, True
+        else:
+            return "", False
+
+    except Exception as e:
+        print(f"LPR parsing error: {e}")
+        return "", False
 
 
 def read_lpr(serial_lpr):
@@ -167,95 +150,42 @@ def read_lpr(serial_lpr):
         return "", False, serial_lpr
 
 
-def parse_lpr_data(data: bytes):
-    try:
-        hex_string = data.hex().upper()
-        # print(hex_string)
-        # print(hex_string[0:10])
-        # BB88AA03FF42453236313644414B00000000000000000000000000006402001C
-        if hex_string[0:10] == "BB88AA02FF" or hex_string[0:10] == "BB88AA03FF":
-            raw_plate_data = hex_string[10:]
-            # print(raw_plate_data)
-            raw_plate_data = raw_plate_data[:-34]
-            # print(raw_plate_data)
-            plate_ascii_string = bytes.fromhex(raw_plate_data).decode('ascii')
-            # print(plate_ascii_string)
-            clean_plate = plate_ascii_string
-            return clean_plate, True
-        else:
-            return "", False
-
-    except Exception as e:
-        print(f"LPR parsing error: {e}")
-        return "", False
-
-
 def parse_emoney_simple(response_hex: str):
+    """
+    Menghapus header lalu memisahkan cardType, cardNumber, dan balance.
+
+    Args:
+        response_hex (str): String hex seperti '02001100000000015715048100000205000EFBDCF9'
+
+    Returns:
+        dict: cardType, cardNo, balance (int)
+    """
     try:
         response_hex = response_hex.upper().strip()
-        response_len = len(response_hex)
 
-        if response_hex == "0200040001100217":
-            print("💡 Info: No card detected response.")
-            return {
-                "status": False,
-                "code": "0200040001100217"
-            }
+        if len(response_hex) < 41:
+            print("❌ Invalid response length")
+            return None
 
-        elif response_len == 42 and response_hex.startswith("020011"):
-            print("Parsing format pendek...")
-            card_type = response_hex[14:16]
-            card_number = response_hex[16:32]
-            balance_hex = response_hex[32:40]
-            balance = int(balance_hex, 16)
+        # Step 1: Hapus header (02 00 11 00 00 00)
+        payload = response_hex[14:-2]  # -2 untuk menghilangkan LRC di akhir
 
-            print(f"Card Number: {card_number}")
-            print(f"Card Type: {card_type}")
-            print(f"Balance: {balance}")
+        # Step 2: Pisahkan field
+        card_type = payload[0:2]
+        card_number = payload[2:18]
+        balance_hex = payload[18:26]
 
-            return {
-                "status": True,
-                "code": response_hex,
-                "card_type": card_type,
-                "card_number": card_number,
-                "balance": balance
-            }
+        balance = int(balance_hex, 16)
 
-        elif response_hex.startswith("020004000110021702001100"):
-            # Step 2: Pisahkan field
-            print("Parsing format panjang...")
-            card_type = response_hex[30:32]
-            card_number = response_hex[32:48]
-            balance_hex = response_hex[48:56]
-
-            balance = int(balance_hex, 16)
-
-            print(f"Card Number: {card_number}")
-            print(f"Card Type: {card_type}")
-            print(f"Balance: {balance}")
-
-            return {
-                "status": True,
-                "code": response_hex,
-                "card_type": card_type,
-                "card_number": card_number,
-                "balance": balance
-            }
-        # 3. Jika format tidak dikenali
-        else:
-            print(
-                f"❌ Error: Format respons tidak dikenali (panjang: {response_len}).")
-            print(f"   -> Respons: {response_hex}")
-            return {
-                "status": False,
-                "code": ""
-            }
+        return {
+            "cardType": card_type,
+            "cardNo": card_number,
+            "balance": balance
+        }
 
     except Exception as e:
         print(f"❌ Error parsing EMoney: {e}")
-        return {
-            "status": False
-        }
+        return None
 
 
 def check_balance(serial_emoney):
@@ -280,39 +210,27 @@ def check_balance(serial_emoney):
         logging.info(
             f"📤 Sending command: {check_balance_command.hex().upper()}")
 
-        # print(f"Check balance command: {check_balance_command}")
         serial_emoney.write(check_balance_command)
         serial_emoney.flush()
 
-#         time.sleep(2)
-        response = serial_emoney.readline()
-        # print(f"Read all: {response}")
+        time.sleep(2)
+        response = serial_emoney.read(64)
 
         if not response:
-            # print("No response received!")
-            return False, "No response received", serial_emoney
+            print("No response received!")
+            return False, "No response received"
 
         response_hex = response.hex().upper()
         print("Response:", response_hex)
 
-        response = parse_emoney_simple(response_hex)
-        if not response.get("status"):
+        card_data = parse_emoney_simple(response_hex)
+        if card_data is None:
             print("❌ Gagal memproses data EMoney (format atau LRC tidak valid)")
-            return False, "Invalid EMoney data format", serial_emoney
+            return False, "Invalid EMoney data", serial_emoney
 
-        print(f"Card Type: {response['card_type']}")
-        print(f"Card No: {response['card_number']}")
-        print(f"Balance: {response['balance']}")
-        print(f"Code: {response['code']}")
-
-        card_data = {
-            "code": response["code"],
-            "card_type": response["card_type"],
-            "card_number": response["card_number"],
-            "balance": response["balance"]
-        }
-
-        print(json.dumps(card_data))
+        print(f"Card Type: {card_data['cardType']}")
+        print(f"Card No: {card_data['cardNo']}")
+        print(f"Balance: {card_data['balance']}")
 
         return True, card_data, serial_emoney
     except (serial.SerialException, OSError) as e:
@@ -323,53 +241,10 @@ def check_balance(serial_emoney):
         except:
             pass
         try:
-            serial_emoney = serial.Serial(
-                config.SERIAL_PORT, config.BAUDRATE, timeout=2)
+            serial_emoney = serial.Serial(SERIAL_PORT, BAUDRATE, timeout=2)
             initialize_device()
             logging.info("EMoney Serial reconnected.")
         except Exception as e:
             logging.error(f"Reconnect EMoney failed: {e}")
             serial_emoney = None
         return False, "Serial reconnect failed", serial_emoney
-
-
-def calculate_lrc(data):
-    """Calculate LRC by XORing all bytes."""
-    lrc = 0
-    for byte in data:
-        lrc ^= byte
-    return bytes([lrc])
-
-
-def send_cancel_command(serial_emoney):
-    """Mengirim perintah hex untuk membatalkan proses deduct ke card reader."""
-    try:
-        payload = bytes.fromhex("EF0104")
-        length = len(payload)
-        header = b'\x02' + bytes([length >> 8, length & 0xFF])
-        frame = header + payload
-        lrc = calculate_lrc(frame[1:])
-        full_command = frame + lrc
-
-        logging.info(
-            f"Mengirim perintah Batal Deduct (hex): {full_command.hex().upper()}")
-        print(f"Cancel deduct command: {full_command.hex().upper()}")
-
-        # Menggunakan 'with' untuk manajemen koneksi serial yang aman
-        if serial_emoney is not None:
-            serial_emoney.write(full_command)
-            serial_emoney.flush()
-        else:
-            with serial.Serial(os.getenv('SERIAL_PORT'), baudrate=38400, timeout=5) as emoney_port:
-                emoney_port.write(full_command)
-                emoney_port.flush()
-        logging.info("Perintah Batal Deduct berhasil dikirim.")
-
-    except serial.SerialException as e:
-        logging.error(f"Gagal mengirim perintah Batal Deduct: {e}")
-        print(f"Gagal mengirim perintah Batal Deduct: {e}")
-    except Exception as e:
-        logging.error(
-            f"Terjadi error tak terduga saat membatalkan deduct: {e}")
-        print(
-            f"Terjadi error tak terduga saat membatalkan deduct: {e}")

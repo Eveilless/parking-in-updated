@@ -1,19 +1,23 @@
 import sys
+import sys
 import os
-import requests  # For downloading images from URLs
+import json
+import shutil
+import glob
 from PyQt5.QtWidgets import QApplication, QWidget, QShortcut
 from PyQt5.QtGui import QPixmap, QPainter, QColor, QFont, QPolygon, QFontMetrics, QKeySequence
-from PyQt5.QtCore import Qt, QTimer, QDateTime, QPoint, pyqtSignal, QObject, QThread, pyqtSlot
+from PyQt5.QtCore import Qt, QTimer, QDateTime, QPoint, pyqtSignal, QObject, QThread
 
 # === Configuration Constants === #
-APP_TITLE = "Parking System TAZAKA"
-LOGO_FILENAME = "assets/logo-tzk.png"
-BACKGROUND_FILENAME = "assets/background.png"  # rasio 16:9 960x540
+APP_TITLE = "Parking System Uniguard"
+LOGO_FILENAME = "assets/uniguard.png"
+BACKGROUND_FILENAME = "assets/background.png"  # Default fallback
 CONTENT_FILENAME = "assets/content.png"
-HEADER_BG_COLOR = "#FFFFFF"
-HEADER_TEXT_COLOR = "#000000"
-FOOTER_BG_COLOR = "#FFFFFF"
-FOOTER_TEXT_COLOR = "#000000"
+USB_MOUNT_PATH = "/media/pi"  # USB mount path on Raspberry Pi
+HEADER_BG_COLOR = "#ffffff"  # White background for navbar
+HEADER_TEXT_COLOR = "#000000"  # Black text for navbar
+FOOTER_BG_COLOR = "#ffffff"  # White background for footer
+FOOTER_TEXT_COLOR = "#000000"  # Black text for footer
 CONTENT_BG_COLOR = "#f0f0f0"
 SHADOW_COLOR = "#000000"
 TEXT_COLOR = "#FFFFFF"
@@ -33,25 +37,6 @@ class SignalHandler(QObject):
     welcome_text_changed = pyqtSignal(str)
 
 
-# === Image Downloader for URL Support === #
-
-
-class ImageDownloader(QObject):
-    image_downloaded = pyqtSignal(bytes, str)  # image_data, image_type
-    download_failed = pyqtSignal(str, str)     # error_message, image_type
-
-    @pyqtSlot(str, str)
-    def download_image(self, url, image_type):
-        """Download image from URL. image_type can be 'vehicle' or 'second'"""
-        try:
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
-            self.image_downloaded.emit(response.content, image_type)
-        except requests.exceptions.RequestException as e:
-            print(f"Error downloading {image_type} image: {e}")
-            self.download_failed.emit(str(e), image_type)
-
-
 # === Global Vars === #
 main_widget = None
 signal_handler = SignalHandler()
@@ -61,85 +46,186 @@ app = None
 
 
 class CustomWidget(QWidget):
-    # Signals for starting image downloads
-    start_vehicle_download = pyqtSignal(str, str)  # url, image_type
-    start_second_download = pyqtSignal(str, str)   # url, image_type
-
     def __init__(self, mode="welcome"):
         super().__init__()
+        print(f"🏗️ Initializing CustomWidget in {mode} mode")
         self.mode = mode
         self.setWindowTitle(APP_TITLE)
         self.resize(1080, 720)
         self.font = DEFAULT_FONT
-        self.logo = self.load_logo()
-        self.background_image = self.load_background()
-        self.content_image = self.load_content()
 
-        # Get welcome text from environment or use default
-        self.welcome_text = os.getenv(
-            "WELCOME_TEXT", "SELAMAT DATANG DI UNIGUARD PARKING SYSTEM").upper()
+        # Load assets with error handling
+        try:
+            self.logo = self.load_logo()
+            print("✅ Logo loaded successfully")
+        except Exception as e:
+            print(f"⚠️ Logo loading failed: {e}")
+            self.logo = QPixmap()
+
+        try:
+            self.background_image = self.load_background()
+            print("✅ Background image loaded successfully")
+        except Exception as e:
+            print(f"⚠️ Background image loading failed: {e}")
+            self.background_image = QPixmap()
+
+        try:
+            self.content_image = self.load_content()
+            print("✅ Content image loaded successfully")
+        except Exception as e:
+            print(f"⚠️ Content image loading failed: {e}")
+            self.content_image = QPixmap()
+
+        self.welcome_text = os.getenv("WELCOME_TEXT")
         self.payment_instruction_text = "Please tap your eMoney card"
 
-        self.setup_signals()
-        self.setup_timer()
-        self.setup_shortcuts()
-        self.setup_image_downloader()  # Setup image downloading thread
-        self.showFullScreen()
+        try:
+            self.setup_signals()
+            print("✅ Signals setup complete")
+        except Exception as e:
+            print(f"⚠️ Signals setup failed: {e}")
+
+        try:
+            self.setup_timer()
+            print("✅ Timer setup complete")
+        except Exception as e:
+            print(f"⚠️ Timer setup failed: {e}")
+
+        try:
+            self.setup_shortcuts()
+            print("✅ Shortcuts setup complete")
+        except Exception as e:
+            print(f"⚠️ Shortcuts setup failed: {e}")
 
         self.payment_data = {}
         self.vehicle_image = QPixmap()
-        self.second_image = QPixmap()  # Added for second image in payment mode
+        self.vehicle_image1 = QPixmap()  # First vehicle image
+        self.vehicle_image2 = QPixmap()  # Second vehicle image
+
+        print("🖥️ CustomWidget initialization complete")
 
     def set_payment_data(self, data_dict):
-        self.payment_data.update(data_dict)
+        self.payment_data = data_dict.copy()
         self.update()
 
-    def set_vehicle_image(self, url_or_path):
-        """Set vehicle image from URL or local file path"""
-        if not url_or_path:
-            self.vehicle_image = QPixmap()
-            self.update()
-            return
-
-        if url_or_path.startswith('http://') or url_or_path.startswith('https://'):
-            print(f"Requesting download for vehicle image: {url_or_path}")
-            self.start_vehicle_download.emit(url_or_path, "vehicle")
-            # Keep current image while loading
-        elif os.path.exists(url_or_path):
-            self.vehicle_image = QPixmap(url_or_path)
-            self.update()
+    def set_vehicle_image(self, image_path):
+        if os.path.exists(image_path):
+            self.vehicle_image = QPixmap(image_path)
         else:
-            print(f"Vehicle image path not found: {url_or_path}")
             self.vehicle_image = QPixmap()
-            self.update()
+        self.update()
 
-    def set_second_image(self, url_or_path):
-        """Set second image from URL or local file path"""
-        if not url_or_path:
-            self.second_image = QPixmap()
-            self.update()
-            return
-
-        if url_or_path.startswith('http://') or url_or_path.startswith('https://'):
-            print(f"Requesting download for second image: {url_or_path}")
-            self.start_second_download.emit(url_or_path, "second")
-            # Keep current image while loading
-        elif os.path.exists(url_or_path):
-            self.second_image = QPixmap(url_or_path)
-            self.update()
+    def set_vehicle_image1(self, image_path):
+        """Set the first vehicle image for payment display"""
+        if image_path and os.path.exists(image_path):
+            self.vehicle_image1 = QPixmap(image_path)
+            print(f"Vehicle image 1 loaded: {image_path}")
         else:
-            print(f"Second image path not found: {url_or_path}")
-            self.second_image = QPixmap()
-            self.update()
+            self.vehicle_image1 = QPixmap()
+            if image_path:
+                print(f"Vehicle image 1 not found: {image_path}")
+            else:
+                print("Vehicle image 1 cleared")
+        self.update()
+
+    def set_vehicle_image2(self, image_path):
+        """Set the second vehicle image for payment display"""
+        if image_path and os.path.exists(image_path):
+            self.vehicle_image2 = QPixmap(image_path)
+            print(f"Vehicle image 2 loaded: {image_path}")
+        else:
+            self.vehicle_image2 = QPixmap()
+            if image_path:
+                print(f"Vehicle image 2 not found: {image_path}")
+            else:
+                print("Vehicle image 2 cleared")
+        self.update()
+
+    def load_logo(self):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        logo_path = os.path.join(script_dir, LOGO_FILENAME)
+
+        if os.path.exists(logo_path):
+            print(f"Logo loaded from: {logo_path}")
+            return QPixmap(logo_path)
+        else:
+            print(f"Logo not found at: {logo_path}")
+            return QPixmap()  # Return empty pixmap as fallback
+
+    def load_background(self):
+        """Load background image dynamically from environment variable and USB mount"""
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # Get background image filename from environment variable
+        env_bg_filename = os.getenv("BACKGROUND_IMAGE", "background.png")
+        print(f"Environment BACKGROUND_IMAGE: {env_bg_filename}")
+
+        # Priority order for loading background image:
+        # 1. USB mount path with env filename
+        # 2. Local assets with env filename
+        # 3. USB mount path with default filename
+        # 4. Local assets with default filename
+
+        image_paths = [
+            # USB + env filename
+            os.path.join("assets/", env_bg_filename),
+            # Local + env filename
+            os.path.join(script_dir, "assets", env_bg_filename),
+            os.path.join("assets/", "background.png"),  # USB + default
+            os.path.join("assets/", BACKGROUND_FILENAME)  # Local + default
+        ]
+
+        for image_path in image_paths:
+            if os.path.exists(image_path):
+                print(f"Background image loaded from: {image_path}")
+                return QPixmap(image_path)
+            else:
+                print(f"Background image not found at: {image_path}")
+
+        print("No background image found, using empty pixmap")
+        return QPixmap()
+
+    def load_content(self):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        content_path = os.path.join(script_dir, CONTENT_FILENAME)
+
+        if os.path.exists(content_path):
+            print(f"Content image loaded from: {content_path}")
+            return QPixmap(content_path)
+        else:
+            print(f"Content image not found at: {content_path}")
+            return QPixmap()  # Return empty pixmap as fallback
+
+    def setup_signals(self):
+        signal_handler.welcome_text_changed.connect(self.set_welcome_text)
+
+    def setup_timer(self):
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update)
+        self.timer.start(30)
+
+    def setup_shortcuts(self):
+        QShortcut(QKeySequence("F11"), self).activated.connect(
+            self.toggle_fullscreen)
+
+    def toggle_fullscreen(self):
+        self.showNormal() if self.isFullScreen() else self.showFullScreen()
+
+    def set_welcome_text(self, new_text):
+        self.welcome_text = new_text
+        self.update()
 
     def set_content_image(self, image_path):
         """Dynamically set content image from file path"""
-        if os.path.exists(image_path):
+        if image_path and os.path.exists(image_path):
             self.content_image = QPixmap(image_path)
             print(f"Content image loaded: {image_path}")
         else:
             self.content_image = QPixmap()
-            print(f"Content image not found: {image_path}")
+            if image_path:
+                print(f"Content image not found: {image_path}")
+            else:
+                print("Content image cleared")
         self.update()
 
     def set_content_pixmap(self, pixmap):
@@ -158,86 +244,12 @@ class CustomWidget(QWidget):
         print("Content image cleared")
         self.update()
 
-    def load_logo(self):
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        logo_path = os.path.join(script_dir, LOGO_FILENAME)
-        return QPixmap(logo_path)
-
-    def load_background(self):
-        # Try to get background filename from environment variable
-        bg_filename = os.getenv("BACKGROUND_IMAGE", BACKGROUND_FILENAME)
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        background_path = os.path.join(script_dir, "assets", bg_filename)
-        return QPixmap(background_path)
-
-    def load_content(self):
-        # Try to get content filename from environment variable
-        content_filename = os.getenv("CONTENT_FILENAME", CONTENT_FILENAME)
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        content_path = os.path.join(script_dir, content_filename)
-        return QPixmap(content_path)
-
-    def setup_signals(self):
-        signal_handler.welcome_text_changed.connect(self.set_welcome_text)
-
-    def setup_image_downloader(self):
-        """Setup image downloader thread for URL support"""
-        self.image_thread = QThread()
-        self.image_downloader = ImageDownloader()
-        self.image_downloader.moveToThread(self.image_thread)
-
-        # Connect signals
-        self.start_vehicle_download.connect(
-            self.image_downloader.download_image)
-        self.start_second_download.connect(
-            self.image_downloader.download_image)
-        self.image_downloader.image_downloaded.connect(self.on_image_ready)
-        self.image_downloader.download_failed.connect(self.on_image_fail)
-
-        self.image_thread.start()
-
-    @pyqtSlot(bytes, str)
-    def on_image_ready(self, image_data, image_type):
-        """Handle successful image download"""
-        pixmap = QPixmap()
-        pixmap.loadFromData(image_data)
-
-        if image_type == "vehicle":
-            self.vehicle_image = pixmap
-            print("Vehicle image loaded successfully from URL.")
-        elif image_type == "second":
-            self.second_image = pixmap
-            print("Second image loaded successfully from URL.")
-
+    def reload_background_image(self):
+        """Reload background image dynamically"""
+        print("Reloading background image...")
+        self.background_image = self.load_background()
         self.update()
-
-    @pyqtSlot(str, str)
-    def on_image_fail(self, error_message, image_type):
-        """Handle failed image download"""
-        print(f"Failed to load {image_type} image from URL: {error_message}")
-
-        if image_type == "vehicle":
-            self.vehicle_image = QPixmap()
-        elif image_type == "second":
-            self.second_image = QPixmap()
-
-        self.update()
-
-    def setup_timer(self):
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.update)
-        self.timer.start(30)
-
-    def setup_shortcuts(self):
-        QShortcut(QKeySequence("F11"), self).activated.connect(
-            self.toggle_fullscreen)
-
-    def toggle_fullscreen(self):
-        self.showNormal() if self.isFullScreen() else self.showFullScreen()
-
-    def set_welcome_text(self, new_text):
-        self.welcome_text = new_text
-        self.update()
+        print("Background image reloaded")
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -384,9 +396,9 @@ class CustomWidget(QWidget):
         self.draw_payment_data(painter, x + margin, y + margin,
                                left_width - margin * 2, height - margin * 2)
 
-        # Draw vehicle photo on the right side
-        self.draw_vehicle_photo(painter, x + left_width + margin, y + margin,
-                                right_width - margin * 2, height - margin * 2)
+        # Draw vehicle photos on the right side (2 photos stacked vertically)
+        self.draw_vehicle_photos(painter, x + left_width + margin, y + margin,
+                                 right_width - margin * 2, height - margin * 2)
 
     def draw_payment_data(self, painter, x, y, width, height):
         # Set font for payment data
@@ -394,136 +406,179 @@ class CustomWidget(QWidget):
         painter.setPen(QColor("#333333"))  # Dark gray text
 
         # Calculate total content height for vertical centering
-        title_height = 30
-        line_spacing = 45  # Increased from 35 to 45 for better readability
+        title_height = 40
+        line_spacing = 50  # Increased spacing for better readability
         data_lines = len(self.payment_data)
-        total_content_height = title_height + 30 + (data_lines * line_spacing)
+        total_content_height = title_height + 40 + (data_lines * line_spacing)
 
         # Calculate starting Y position for vertical centering
         start_y = y + (height - total_content_height) // 2
         current_y = start_y
 
         # Draw title
-        painter.setFont(QFont("Arial", 24, QFont.Bold))
+        painter.setFont(QFont("Arial", 28, QFont.Bold))
         painter.setPen(QColor("#000000"))  # Black text for title
         painter.drawText(x, current_y, "DATA TIKET PARKIR")
-        current_y += title_height + 30  # Increased spacing after title
+        current_y += title_height + 40  # Increased spacing after title
 
         # Draw payment data
-        painter.setFont(QFont("Arial", 18, QFont.Normal))
+        painter.setFont(QFont("Arial", 20, QFont.Normal))
         painter.setPen(QColor("#333333"))  # Dark gray text
 
+        # Define friendly field names
+        field_names = {
+            'ticket_code': 'Kode Tiket',
+            'device_name': 'Pintu Masuk',
+            'start_time': 'Waktu Masuk',
+            'plat': 'Plat Nomor',
+            'status': 'Status',
+            'emoney_card_number': 'No Kartu',
+            'emoney_card_type': 'Jenis Kartu',
+            'emoney_balance': 'Sisa Saldo'
+        }
+
         for key, value in self.payment_data.items():
-            line = f"{key}: {value}"
+            display_key = field_names.get(key, key.replace('_', ' ').title())
+
+            # Format balance with currency if it's the balance field
+            if key == 'emoney_balance' and value is not None:
+                try:
+                    balance_value = float(value)
+                    formatted_value = f"Rp {balance_value:,.0f}".replace(
+                        ",", ".")
+                except (ValueError, TypeError):
+                    formatted_value = str(value)
+            else:
+                formatted_value = str(value) if value is not None else 'N/A'
+
+            line = f"{display_key}: {formatted_value}"
             painter.drawText(x, current_y, line)
             current_y += line_spacing
 
-    def draw_vehicle_photo(self, painter, x, y, width, height):
-        # Calculate area for two images (stacked vertically)
-        image_height = (height - 60) // 2  # Subtract margin and divide by 2
-        margin_between = 20
+    def draw_vehicle_photos(self, painter, x, y, width, height):
+        """Draw 2 vehicle photos stacked vertically on the right side"""
+        # Calculate dimensions for 2 photos with spacing
+        photo_spacing = 10
+        # Split height equally with spacing
+        photo_height = (height - photo_spacing) // 2
 
-        # Draw first image (top half)
-        first_img_y = y
-        if not self.vehicle_image.isNull():
-            # Scale the first image to fit the area
-            scaled_vehicle = self.vehicle_image.scaled(
-                width, image_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        # Draw first photo (top)
+        photo1_y = y
+        self.draw_single_vehicle_photo(painter, x, photo1_y, width, photo_height,
+                                       self.vehicle_image1, "FOTO KENDARAAN\n(IPCAM)\nTIDAK TERSEDIA")
+
+        # Draw second photo (bottom)
+        photo2_y = y + photo_height + photo_spacing
+        self.draw_single_vehicle_photo(painter, x, photo2_y, width, photo_height,
+                                       self.vehicle_image2, "FOTO PLAT NOMOR\n(LPR)\nTIDAK TERSEDIA")
+
+    def draw_single_vehicle_photo(self, painter, x, y, width, height, image, placeholder_text):
+        """Draw a single vehicle photo with placeholder if image is not available"""
+        if not image.isNull():
+            # Scale the vehicle image to fit the area
+            scaled_vehicle = image.scaled(
+                width, height - 20, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
             # Center the image in the area
             img_x = x + (width - scaled_vehicle.width()) // 2
-            img_y = first_img_y + (image_height - scaled_vehicle.height()) // 2
+            img_y = y + (height - scaled_vehicle.height()) // 2
 
             # Ensure image stays within bounds
             img_x = max(x, min(img_x, x + width - scaled_vehicle.width()))
-            img_y = max(first_img_y, min(img_y, first_img_y +
-                        image_height - scaled_vehicle.height()))
+            img_y = max(y, min(img_y, y + height - scaled_vehicle.height()))
 
             painter.drawPixmap(img_x, img_y, scaled_vehicle)
         else:
-            # Draw placeholder for first image
+            # Draw placeholder for vehicle photo
             painter.setPen(QColor("#CCCCCC"))
-            painter.drawRect(x, first_img_y, width, image_height)
+            painter.drawRect(x, y, width, height - 20)
 
             painter.setPen(QColor("#666666"))
             painter.setFont(QFont("Arial", 14, QFont.Normal))
-            placeholder_text = "FOTO KENDARAAN 1\nTIDAK TERSEDIA"
-            painter.drawText(x, first_img_y, width, image_height,
+            painter.drawText(x, y, width, height - 20,
                              Qt.AlignCenter, placeholder_text)
 
-        # Draw second image (bottom half)
-        second_img_y = y + image_height + margin_between
-        if not self.second_image.isNull():
-            # Scale the second image to fit the area
-            scaled_second = self.second_image.scaled(
-                width, image_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-
-            # Center the image in the area
-            img_x = x + (width - scaled_second.width()) // 2
-            img_y = second_img_y + (image_height - scaled_second.height()) // 2
-
-            # Ensure image stays within bounds
-            img_x = max(x, min(img_x, x + width - scaled_second.width()))
-            img_y = max(second_img_y, min(img_y, second_img_y +
-                        image_height - scaled_second.height()))
-
-            painter.drawPixmap(img_x, img_y, scaled_second)
-        else:
-            # Draw placeholder for second image
-            painter.setPen(QColor("#CCCCCC"))
-            painter.drawRect(x, second_img_y, width, image_height)
-
-            painter.setPen(QColor("#666666"))
-            painter.setFont(QFont("Arial", 14, QFont.Normal))
-            placeholder_text = "FOTO KENDARAAN 2\nTIDAK TERSEDIA"
-            painter.drawText(x, second_img_y, width, image_height,
-                             Qt.AlignCenter, placeholder_text)
-
-    def reset_to_welcome(self):
-        """Membersihkan semua data pembayaran dan mengembalikan UI ke mode welcome."""
-        print("🔄 Mereset UI ke mode welcome dan membersihkan data...")
-
-        # Kosongkan dictionary data pembayaran
-        self.payment_data.clear()
-
-        # Reset gambar ke pixmap kosong
-        self.vehicle_image = QPixmap()
-        self.second_image = QPixmap()
-
-        # Kembalikan mode ke welcome
-        self.mode = "welcome"
-
-        # Atur ulang teks footer ke default
-        default_welcome_text = os.getenv(
-            "WELCOME_TEXT", "SELAMAT DATANG DI TAZAKA PARKING SYSTEM").upper()
-        self.set_welcome_text(default_welcome_text)
-
-        # Paksa UI untuk menggambar ulang
-        self.update()
 
 # === Public API === #
-
-
 def show_ui():
     global main_widget, app
-    if not QApplication.instance():
-        app = QApplication(sys.argv)
-    else:
+
+    print("📱 Starting UI initialization...")
+
+    # Check if QApplication already exists
+    if QApplication.instance() is not None:
         app = QApplication.instance()
-    main_widget = CustomWidget()
-    main_widget.setCursor(Qt.BlankCursor)
-    main_widget.show()
-    return main_widget
+        print("✅ Using existing QApplication instance")
+    else:
+        try:
+            app = QApplication(sys.argv)
+            print("✅ New QApplication created")
+        except Exception as e:
+            print(f"❌ Failed to create QApplication: {e}")
+            raise
+
+    try:
+        main_widget = CustomWidget()
+        print("✅ CustomWidget created")
+
+        main_widget.setCursor(Qt.BlankCursor)
+        print("✅ Cursor set to blank")
+
+        # Show fullscreen
+        main_widget.showFullScreen()
+        print("✅ Widget shown in fullscreen")
+
+        # Force update to ensure it's visible
+        main_widget.update()
+        app.processEvents()
+        print("✅ UI events processed")
+
+        return main_widget
+
+    except Exception as e:
+        print(f"❌ CustomWidget initialization failed: {e}")
+        raise
 
 
 def show_ui_payment(ticket_data):
     global main_widget, app
-    app = QApplication(sys.argv)
-    main_widget = CustomWidget(mode="payment")
-    main_widget.setCursor(Qt.BlankCursor)
-    main_widget.set_payment_data(ticket_data)
-    main_widget.show()
-    return main_widget
+
+    print("📳 Starting payment UI initialization...")
+
+    # Check if QApplication already exists
+    if QApplication.instance() is not None:
+        app = QApplication.instance()
+        print("✅ Using existing QApplication instance")
+    else:
+        try:
+            app = QApplication(sys.argv)
+            print("✅ New QApplication created")
+        except Exception as e:
+            print(f"❌ Failed to create QApplication: {e}")
+            raise
+
+    try:
+        main_widget = CustomWidget(mode="payment")
+        print("✅ CustomWidget created in payment mode")
+
+        main_widget.setCursor(Qt.BlankCursor)
+        main_widget.set_payment_data(ticket_data)
+        print("✅ Payment data set")
+
+        # Show fullscreen
+        main_widget.showFullScreen()
+        print("✅ Payment widget shown in fullscreen")
+
+        # Force update to ensure it's visible
+        main_widget.update()
+        app.processEvents()
+        print("✅ Payment UI events processed")
+
+        return main_widget
+
+    except Exception as e:
+        print(f"❌ Payment UI initialization failed: {e}")
+        raise
 
 
 def set_welcome_text(text):
@@ -551,16 +606,208 @@ def clear_content():
         main_widget.clear_content()
 
 
-def set_second_image(image_path):
-    """Set the second image for payment mode"""
+def set_vehicle_image1(image_path):
+    """Set the first vehicle image for payment display"""
     if app and app.thread() == QThread.currentThread() and main_widget:
-        main_widget.set_second_image(image_path)
+        main_widget.set_vehicle_image1(image_path)
 
 
-def switch_to_welcome_mode():
-    """Membersihkan data pembayaran dan mengembalikan UI ke mode welcome."""
-    if main_widget:
-        main_widget.reset_to_welcome()
+def set_vehicle_image2(image_path):
+    """Set the second vehicle image for payment display"""
+    if app and app.thread() == QThread.currentThread() and main_widget:
+        main_widget.set_vehicle_image2(image_path)
+
+
+def reload_background_image():
+    """Reload background image dynamically from environment and USB"""
+    if app and app.thread() == QThread.currentThread() and main_widget:
+        main_widget.reload_background_image()
+
+
+def load_ipcam_image():
+    """Load the latest image from ipcam folder"""
+    ipcam_folder = "ipcam"
+    if not os.path.exists(ipcam_folder):
+        print(f"ipcam folder not found: {ipcam_folder}")
+        return None
+
+    try:
+        # Get all image files in ipcam folder
+        image_files = [f for f in os.listdir(ipcam_folder)
+                       if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))]
+
+        if not image_files:
+            print("No image files found in ipcam folder")
+            return None
+
+        # Sort by modification time and get the latest
+        image_files.sort(key=lambda x: os.path.getmtime(
+            os.path.join(ipcam_folder, x)), reverse=True)
+        latest_image = os.path.join(ipcam_folder, image_files[0])
+
+        print(f"Loading ipcam image: {latest_image}")
+        return latest_image
+    except Exception as e:
+        print(f"Error loading ipcam image: {e}")
+        return None
+
+
+def load_lpr_image():
+    """Load the latest image from lpr folder"""
+    lpr_folder = "lpr"
+    if not os.path.exists(lpr_folder):
+        print(f"lpr folder not found: {lpr_folder}")
+        return None
+
+    try:
+        # Get all image files in lpr folder
+        image_files = [f for f in os.listdir(lpr_folder)
+                       if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))]
+
+        if not image_files:
+            print("No image files found in lpr folder")
+            return None
+
+        # Sort by modification time and get the latest
+        image_files.sort(key=lambda x: os.path.getmtime(
+            os.path.join(lpr_folder, x)), reverse=True)
+        latest_image = os.path.join(lpr_folder, image_files[0])
+
+        print(f"Loading lpr image: {latest_image}")
+        return latest_image
+    except Exception as e:
+        print(f"Error loading lpr image: {e}")
+        return None
+
+
+def switch_to_payment_mode_with_data():
+    """Switch UI to payment mode and load ticket data from JSON"""
+    global main_widget
+
+    if not main_widget:
+        return False
+
+    try:
+        # Load ticket data from JSON
+        ticket_data_path = "ticket_data.json"
+        if os.path.exists(ticket_data_path):
+            with open(ticket_data_path, 'r') as f:
+                ticket_data = json.load(f)
+        else:
+            print(f"ticket_data.json not found")
+            ticket_data = {}
+
+        plate = ""
+        if os.path.exists("lpr.txt"):
+            with open("lpr.txt", "r") as f:
+                lines = f.readlines()
+                if len(lines) >= 1:
+                    plate = lines[0].strip()
+                else:
+                    print(
+                        "File lpr.txt kosong, tidak ada data plat nomor")
+
+        payment_data = {
+            "ticket_code": ticket_data.get("ticket_code", ""),
+            "device_name": ticket_data.get("device_name", ""),
+            "jam_masuk": ticket_data.get("start_time", ""),
+            "status": ticket_data.get("status"),
+            "plat": plate
+        }
+
+        if ticket_data.get("emoney_card_number"):
+            emoney_info = {
+                "emoney_card_number": ticket_data.get("emoney_card_number", ""),
+                "emoney_card_type": ticket_data.get("emoney_card_type", ""),
+                "emoney_balance": ticket_data.get("emoney_balance", "")
+            }
+
+            payment_data.update(emoney_info)
+
+        # Switch to payment mode with raw ticket data
+        main_widget.mode = "payment"
+        main_widget.set_payment_data(payment_data)
+
+        # Load images from folders
+        ipcam_image = load_ipcam_image()
+        lpr_image = load_lpr_image()
+
+        # Set vehicle images
+        main_widget.set_vehicle_image1(ipcam_image)
+        main_widget.set_vehicle_image2(lpr_image)
+
+        main_widget.set_welcome_text(f"silahkan masuk".upper())
+
+        # Update the display
+        main_widget.update()
+
+        print("Successfully switched to payment mode with data")
+        return True
+
+    except Exception as e:
+        print(f"Error switching to payment mode: {e}")
+        return False
+
+
+def create_image_folders():
+    """Create ipcam and lpr folders if they don't exist"""
+    folders = ["ipcam", "lpr"]
+
+    for folder in folders:
+        if not os.path.exists(folder):
+            try:
+                os.makedirs(folder)
+                print(f"Created folder: {folder}")
+            except Exception as e:
+                print(f"Error creating folder {folder}: {e}")
+        else:
+            print(f"Folder already exists: {folder}")
+
+
+def cleanup_image_folders():
+    """Empty the ipcam and lpr folders by deleting all files in them"""
+    folders = ["ipcam", "lpr"]
+
+    for folder in folders:
+        if os.path.exists(folder):
+            try:
+                # Get all files in the folder
+                files = glob.glob(os.path.join(folder, "*"))
+
+                # Delete each file
+                for file_path in files:
+                    if os.path.isfile(file_path):
+                        os.remove(file_path)
+                        print(f"Deleted file: {file_path}")
+                    elif os.path.isdir(file_path):
+                        shutil.rmtree(file_path)
+                        print(f"Deleted directory: {file_path}")
+
+                print(f"Cleaned up folder: {folder}")
+
+            except Exception as e:
+                print(f"Error cleaning up folder {folder}: {e}")
+        else:
+            print(f"Folder not found for cleanup: {folder}")
+
+
+def cleanup_vehicle_images():
+    """Clean up vehicle images after transaction is complete"""
+    global main_widget
+
+    try:
+        # Clear the images from UI
+        if main_widget:
+            main_widget.set_vehicle_image1(None)
+            main_widget.set_vehicle_image2(None)
+
+        # Clean up the folders
+        cleanup_image_folders()
+
+        print("Vehicle images cleaned up successfully")
+
+    except Exception as e:
+        print(f"Error cleaning up vehicle images: {e}")
 
 
 # === Main Entry === #

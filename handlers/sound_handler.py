@@ -9,8 +9,6 @@ def setup_sound():
             script_dir, "../assets/print_ticket.mp3")
         please_enter_sound = os.path.join(
             script_dir, "../assets/please_enter.mp3")
-        cancel_sound = os.path.join(
-            script_dir, "../assets/cancel.mp3")
 
         if not init_sound(print_ticket_sound):
             print(
@@ -47,12 +45,12 @@ def init_sound(sound_file):
 
 
 def play_vehicle_detected_sound(sound_file):
-    """
-    Play a sound when a vehicle is detected.
-    This provides audio feedback to the user.
-    """
     try:
-        # Get the absolute path of the script directory
+        if pygame.mixer.music.get_busy():
+            # Jangan putar ulang jika masih bermain
+            print("Sound is already playing, skipping.")
+            return
+
         script_dir = os.path.dirname(os.path.abspath(__file__))
         sound_path = os.path.join(script_dir, sound_file)
 

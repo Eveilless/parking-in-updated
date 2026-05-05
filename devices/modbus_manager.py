@@ -1,57 +1,51 @@
-import threading
 import os
-import time
 from pymodbus.client import ModbusTcpClient
 from pymodbus import FramerType
-from pymodbus.exceptions import ModbusIOException
+import threading
 
 class ModbusManager:
     def __init__(self):
-        self.host = os.getenv('ETH_HOST', '192.168.0.7')
-        self.port = int(os.getenv('ETH_PORT', 502))
-        self.timeout = 3
+        host = os.getenv('ETH_HOST', '127.0.0.1')
+        port = int(os.getenv('ETH_PORT', '502'))
         
         self.slave_id_input = 1
-        self.coil_address_input = 0x0081
-        self.input_count = 8
-        self.reg_button_ticket = 2
-        self.reg_loop_sensor = 0
-        
         self.slave_id_output = 2
+        self.coil_address_input = 0x0081
         self.coil_address_output = 0
-        self.output_count = 4
+        self.input_count = 8
         self.coil_barrier_gate = 0
         
-        self.client = None
-        self.lock = threading.Lock()
+        # Input registers index
+        self.LOOP_ONE = 0
+        self.LOOP_TWO = 1
+        self.BUTTON_TICKET = 2
         
+        self.client = ModbusTcpClient(
+            host=host,
+            port=port,
+            framer=FramerType.RTU,
+            timeout=3,
+            retries=1
+        )
+        self.lock = threading.Lock()
+
     def connect(self):
         with self.lock:
-            self.client = ModbusTcpClient(
-                host=self.host,
-                port=self.port,
-                framer=FramerType.RTU,
-                timeout=self.timeout,
-                retries=1
-            )
             if self.client.connect():
-                print(f"✅ Connected to Modbus {self.host}:{self.port}")
+                print("✅ Modbus Connected")
                 return True
-            else:
-                print(f"❌ Failed to connect to Modbus {self.host}:{self.port}")
-                return False
-                
+            print("❌ Modbus Failed to connect")
+            return False
+
     def disconnect(self):
         with self.lock:
             if self.client:
                 self.client.close()
                 print("🔌 Modbus Connection closed")
-                
+
     def read_inputs(self):
         with self.lock:
             try:
-                if not self.client.is_socket_open():
-                    self.client.connect()
                 response = self.client.read_holding_registers(
                     address=self.coil_address_input,
                     count=self.input_count,
@@ -60,19 +54,13 @@ class ModbusManager:
                 if response and not response.isError():
                     return response.registers
                 return None
-            except ModbusIOException as e:
-                print(f"❌ Modbus read error: {e}")
-                self.client.close()
-                return None
             except Exception as e:
-                print(f"❌ Modbus generic error: {e}")
+                print(f"[Modbus] Read exception: {e}")
                 return None
-                
+
     def write_coil(self, address, state):
         with self.lock:
             try:
-                if not self.client.is_socket_open():
-                    self.client.connect()
                 result = self.client.write_coil(
                     address=self.coil_address_output + address,
                     value=bool(state),
@@ -83,13 +71,10 @@ class ModbusManager:
                     return True
                 return False
             except Exception as e:
-                print(f"❌ Write coil error: {e}")
-                self.client.close()
+                print(f"[Modbus] Write exception: {e}")
                 return False
-
+                
     def open_gate(self):
-        """Membuka barrier gate lalu menutupnya kembali jika diperlukan (atau gate punya autoscant)"""
-        # Biasanya barrier gate menggunakan sinyal pulse/trigger
         self.write_coil(self.coil_barrier_gate, True)
         
     def close_gate(self):
