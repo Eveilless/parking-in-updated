@@ -84,7 +84,7 @@ class ParkingController:
                                 self.ui.cleanup_vehicle_images()
                 
                 # Button Detection
-                print("[DEBUG controller] Button state: ", button_ticket, flush=True)
+                # print("[DEBUG controller] Button state: ", button_ticket, flush=True)
                 if prev_button == 0 and button_ticket == 1:
                     with self.lock:
                         if not self.is_busy and self.vehicle_detected:
