@@ -46,7 +46,7 @@ class ParkingController:
                 button_ticket = registers[self.modbus.BUTTON_TICKET]
                 
                 # Vehicle Detection
-                if loop_one == 1:
+                if loop_one == 1: # and loop_two == 1:
                     local_type = os.getenv("IDLOOP1") if loop_two == 0 else os.getenv("IDLOOP2")
                     with self.lock:
                         if not self.vehicle_detected:
@@ -62,9 +62,11 @@ class ParkingController:
                                     self.ui.main_widget.mode = "welcome"
                                     self.ui.main_widget.update()
                                 self.ui.set_welcome_text("SILAHKAN TEMPELKAN KARTU ATAU TEKAN TOMBOL TICKET")
+                # elif loop_one == 1 or loop_two == 1:
+                    # motor
                 else:
                     if self.vehicle_detected:
-                        self.modbus.close_gate()
+                        # self.modbus.close_gate()
                         if self.is_busy:
                             if os.path.exists("ticket_data.json"): os.remove("ticket_data.json")
                             self.is_busy = False
