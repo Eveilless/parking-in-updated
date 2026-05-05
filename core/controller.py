@@ -181,7 +181,8 @@ class ParkingController:
                                         print("[Emoney Debug] Tipe kartu tidak diizinkan.")
                                     self.emoney.flush()
                                 finally:
-                                    self.is_busy = True # keep polling
+                                    self.is_busy = False
+                                    self.vehicle_detected = False # NOTE
                             else:
                                 print("[Emoney Debug] Diabaikan karena sedang sibuk atau mobil belum terdeteksi penuh.")
             time.sleep(0.05)
