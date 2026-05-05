@@ -9,7 +9,7 @@ class ModbusManager:
         port = int(os.getenv('ETH_PORT', '502'))
         
         self.slave_id_input = 1
-        self.slave_id_output = 1
+        self.slave_id_output = 2
         self.coil_address_input = 0x0081
         self.coil_address_output = 0
         self.input_count = 8
