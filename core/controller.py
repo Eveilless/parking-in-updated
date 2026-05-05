@@ -119,6 +119,10 @@ class ParkingController:
             self.offline.save_transaction(response)
             self.printer.print_ticket(response)
             self.modbus.open_gate()
+            time.sleep(0.5)
+            self.modbus.close_gate()
+            time.sleep(0.5)
+            self.modbus.open_gate()
             if self.oled: self.oled.print_message("Gerbang Terbuka!")
             self.wait_and_show_payment_ui()
         else:
