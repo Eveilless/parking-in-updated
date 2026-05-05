@@ -114,7 +114,7 @@ class ParkingController:
         plate = self.offline.get_plate()
         success, response = self.api.validate_ticket(vehicle_type, plate)
 
-        print(f"[DEBUG controller] ticket validation result: {success}. response: {response}")
+        print(f"[DEBUG controller] ticket validation result: {success}. response: {response}", flush=True)
         if success:
             self.offline.save_transaction(response)
             self.printer.print_ticket(response)
